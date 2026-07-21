@@ -4,7 +4,7 @@
 # Scenario: 1 node, TP=2, input 128K, output 1K, TPOT target 50ms
 #
 # Usage:
-#   1. Set MODEL_PATH to your local model path (or modify the default below)
+#   1. Set MODEL_PATH to your local model path
 #   2. Set ASCEND_VISIBLE_DEVICES to the NPU devices you want to use
 #   3. Run: bash run_qwen3_5_35b_a3b_perf.sh
 #
@@ -14,12 +14,26 @@ set -e
 # ==================== Configurable Parameters ====================
 
 # Model path - modify to your local path
-export MODEL_PATH="${MODEL_PATH:-/root/.cache/modelscope/hub/models/Qwen/Qwen3.5-35B-A3B}"
+MODEL_PATH="${MODEL_PATH:-/root/.cache/modelscope/hub/models/Qwen/Qwen3.5-35B-A3B}"
 
 # NPU device IDs (2 devices for TP=2)
-export ASCEND_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES:-0,1}"
+ASCEND_VISIBLE_DEVICES="${ASCEND_VISIBLE_DEVICES:-0,1}"
+
+# Server host and port
+HOST="127.0.0.1"
+PORT="${PORT:-30066}"
+
+# Benchmark parameters
+MAX_CONCURRENCY=3
+NUM_PROMPTS=3
+INPUT_LEN=128000
+OUTPUT_LEN=1000
+RANDOM_RANGE_RATIO=1
+SEED=1
 
 # ==================== Environment Variables ====================
+
+export ASCEND_VISIBLE_DEVICES
 
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 export STREAMS_PER_DEVICE=32
@@ -33,16 +47,97 @@ export ASCEND_USE_FIA=1
 export SGLANG_PREFILL_DELAYER_MAX_DELAY_PASSES=20
 export GDN_ATTN_BACKEND_TRITON=1
 
-# ==================== Run Test ====================
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TEST_FILE="${SCRIPT_DIR}/test/registered/ascend/performance/qwen3_5_35b_a3b/test_npu_qwen3_5_35b_a3b_1p_in128k_out1k_50ms.py"
+# ==================== Launch Server ====================
 
 echo "=========================================="
-echo "Running Qwen3.5-35B-A3B performance test"
-echo "  Model:   ${MODEL_PATH}"
-echo "  Devices: ${ASCEND_VISIBLE_DEVICES}"
-echo "  Test:    ${TEST_FILE}"
+echo "Launching sglang server for Qwen3.5-35B-A3B"
+echo "  Model:    ${MODEL_PATH}"
+echo "  Devices:  ${ASCEND_VISIBLE_DEVICES}"
+echo "  TP size:  2"
+echo "  Host:     ${HOST}:${PORT}"
 echo "=========================================="
 
-python3 "${TEST_FILE}"
+sglang serve \
+    --model-path "${MODEL_PATH}" \
+    --host "${HOST}" \
+    --port "${PORT}" \
+    --tp-size 2 \
+    --nnodes 1 \
+    --attention-backend ascend \
+    --device npu \
+    --chunked-prefill-size -1 \
+    --max-total-tokens 420000 \
+    --max-prefill-tokens 128000 \
+    --disable-radix-cache \
+    --trust-remote-code \
+    --max-running-requests 3 \
+    --max-mamba-cache-size 3 \
+    --mem-fraction-static 0.9 \
+    --cuda-graph-bs 1 2 3 \
+    --enable-multimodal \
+    --mm-attention-backend ascend_attn \
+    --dtype bfloat16 \
+    --mamba-ssm-dtype bfloat16 \
+    --speculative-algorithm NEXTN \
+    --speculative-num-steps 3 \
+    --speculative-eagle-topk 1 \
+    --speculative-num-draft-tokens 4 \
+    --reasoning-parser qwen3 \
+    --tool-call-parser qwen3_coder \
+    &
+
+SERVER_PID=$!
+
+# ==================== Wait for Server Ready ====================
+
+echo "Waiting for server to be ready..."
+MAX_WAIT=600
+ELAPSED=0
+while [ ${ELAPSED} -lt ${MAX_WAIT} ]; do
+    if curl -s "http://${HOST}:${PORT}/health" > /dev/null 2>&1; then
+        echo "Server is ready after ${ELAPSED}s"
+        break
+    fi
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
+    echo "  ... waiting (${ELAPSED}s/${MAX_WAIT}s)"
+done
+
+if [ ${ELAPSED} -ge ${MAX_WAIT} ]; then
+    echo "ERROR: Server failed to start within ${MAX_WAIT}s"
+    kill ${SERVER_PID} 2>/dev/null || true
+    exit 1
+fi
+
+# ==================== Run Benchmark ====================
+
+echo ""
+echo "=========================================="
+echo "Running bench-serving benchmark"
+echo "  Input length:     ${INPUT_LEN}"
+echo "  Output length:    ${OUTPUT_LEN}"
+echo "  Max concurrency:  ${MAX_CONCURRENCY}"
+echo "  Num prompts:      ${NUM_PROMPTS}"
+echo "=========================================="
+
+python3 -m sglang.bench_serving \
+    --host "${HOST}" \
+    --port "${PORT}" \
+    --model "${MODEL_PATH}" \
+    --backend sglang \
+    --dataset-name random \
+    --random-input-len "${INPUT_LEN}" \
+    --random-output-len "${OUTPUT_LEN}" \
+    --random-range-ratio "${RANDOM_RANGE_RATIO}" \
+    --max-concurrency "${MAX_CONCURRENCY}" \
+    --num-prompts "${NUM_PROMPTS}" \
+    --seed "${SEED}"
+
+# ==================== Cleanup ====================
+
+echo ""
+echo "Stopping server (PID: ${SERVER_PID})..."
+kill ${SERVER_PID} 2>/dev/null || true
+wait ${SERVER_PID} 2>/dev/null || true
+
+echo "Done."
