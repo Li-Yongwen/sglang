@@ -1567,8 +1567,13 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
                     continue
 
                 param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader = getattr(
+                    param, "weight_loader", default_weight_loader
+                )
+                try:
+                    weight_loader(param, loaded_weight, shard_id)
+                except TypeError:
+                    default_weight_loader(param, loaded_weight)
                 break
             else:
                 # Track if this is an expert weight to enable early skipping
@@ -1618,14 +1623,19 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
                         # We should ask the weight loader to return success or
                         # not here since otherwise we may skip experts with
                         # # other available replicas.
-                        weight_loader = param.weight_loader
-                        weight_loader(
-                            param,
-                            loaded_weight,
-                            name_mapped,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
                         )
+                        try:
+                            weight_loader(
+                                param,
+                                loaded_weight,
+                                name_mapped,
+                                shard_id=shard_id,
+                                expert_id=expert_id,
+                            )
+                        except TypeError:
+                            default_weight_loader(param, loaded_weight)
                     name = name_mapped
                     break
                 else:
