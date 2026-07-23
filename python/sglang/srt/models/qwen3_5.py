@@ -1505,17 +1505,20 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
             if name not in params_dict:
                 return False
             param = params_dict[name]
-            weight_loader = param.weight_loader
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             # let ep moe layer to gracefully handle expert_ids that do not belong to local moe rank
             for expert_id in range(num_experts):
                 curr_expert_weight = loaded_weight[expert_id]
-                weight_loader(
-                    param,
-                    curr_expert_weight,
-                    name,
-                    shard_id,
-                    expert_id,
-                )
+                try:
+                    weight_loader(
+                        param,
+                        curr_expert_weight,
+                        name,
+                        shard_id,
+                        expert_id,
+                    )
+                except TypeError:
+                    default_weight_loader(param, curr_expert_weight)
             return True
 
         loaded_params: Set[str] = set()
@@ -1972,17 +1975,20 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             if name not in params_dict:
                 return False
             param = params_dict[name]
-            weight_loader = param.weight_loader
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             # let ep moe layer to gracefully handle expert_ids that do not belong to local moe rank
             for expert_id in range(num_experts):
                 curr_expert_weight = loaded_weight[expert_id]
-                weight_loader(
-                    param,
-                    curr_expert_weight,
-                    name,
-                    shard_id,
-                    expert_id,
-                )
+                try:
+                    weight_loader(
+                        param,
+                        curr_expert_weight,
+                        name,
+                        shard_id,
+                        expert_id,
+                    )
+                except TypeError:
+                    default_weight_loader(param, curr_expert_weight)
             return True
 
         loaded_params: Set[str] = set()
@@ -2055,8 +2061,13 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                     continue
 
                 param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader = getattr(
+                    param, "weight_loader", default_weight_loader
+                )
+                try:
+                    weight_loader(param, loaded_weight, shard_id)
+                except TypeError:
+                    default_weight_loader(param, loaded_weight)
                 break
             else:
                 # Track if this is an expert weight to enable early skipping
@@ -2148,14 +2159,19 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                         # We should ask the weight loader to return success or
                         # not here since otherwise we may skip experts with
                         # # other available replicas.
-                        weight_loader = param.weight_loader
-                        weight_loader(
-                            param,
-                            loaded_weight,
-                            name_mapped,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
                         )
+                        try:
+                            weight_loader(
+                                param,
+                                loaded_weight,
+                                name_mapped,
+                                shard_id=shard_id,
+                                expert_id=expert_id,
+                            )
+                        except TypeError:
+                            default_weight_loader(param, loaded_weight)
                     name = name_mapped
                     break
                 else:
